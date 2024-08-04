@@ -4,6 +4,7 @@ import {
   FileValidationError,
   ProjectValidationError
 } from '../../domain-objects/Project';
+import logger from '../../logger/winton';
 
 export default function createProject(req, res) {
   let projectValues = {
@@ -31,23 +32,23 @@ export default function createProject(req, res) {
 }
 
 // TODO: What happens if you don't supply any files?
-export async function apiCreateProject(req, res) {
+export function apiCreateProject(req, res) {
   const params = Object.assign({ user: req.user._id }, req.body);
 
-  const sendValidationErrors = (err, type, code = 422) => {
+  function sendValidationErrors(err, type, code = 422) {
     res.status(code).json({
       message: `${type} Validation Failed`,
       detail: err.message,
       errors: err.files
     });
-  };
+  }
 
   // TODO: Error handling to match spec
-  const sendFailure = (err) => {
+  function sendFailure(err) {
     res.status(500).end();
-  };
+  }
 
-  const handleErrors = (err) => {
+  function handleErrors(err) {
     if (err instanceof FileValidationError) {
       sendValidationErrors(err, 'File', err.code);
     } else if (err instanceof ProjectValidationError) {
@@ -55,11 +56,11 @@ export async function apiCreateProject(req, res) {
     } else {
       sendFailure();
     }
-  };
+  }
 
-  const checkUserHasPermission = () => {
+  function checkUserHasPermission() {
     if (req.user.username !== req.params.username) {
-      console.log('no permission');
+      logger.error('no permission');
       const error = new ProjectValidationError(
         `'${req.user.username}' does not have permission to create for '${req.params.username}'`
       );
@@ -67,32 +68,35 @@ export async function apiCreateProject(req, res) {
 
       throw error;
     }
-  };
+  }
 
   try {
     checkUserHasPermission();
 
-    if (!params.files || typeof params.files !== 'object') {
-      const error = new FileValidationError("'files' must be an object");
-      throw error;
-    }
-
     const model = toModel(params);
 
-    const { isUnique, conflictingIds } = await model.isSlugUnique();
+    return model
+      .isSlugUnique()
+      .then(({ isUnique, conflictingIds }) => {
+        if (isUnique) {
+          return model.save().then((newProject) => {
+            res.status(201).json({ id: newProject.id });
+          });
+        }
 
-    if (!isUnique) {
-      const error = new ProjectValidationError(
-        `Slug "${model.slug}" is not unique. Check ${conflictingIds.join(', ')}`
-      );
-      error.code = 409;
+        const error = new ProjectValidationError(
+          `Slug "${model.slug}" is not unique. Check ${conflictingIds.join(
+            ', '
+          )}`
+        );
+        error.code = 409;
 
-      throw error;
-    }
-
-    const newProject = await model.save();
-    res.status(201).json({ id: newProject.id });
+        throw error;
+      })
+      .then(checkUserHasPermission)
+      .catch(handleErrors);
   } catch (err) {
     handleErrors(err);
+    return Promise.reject(err);
   }
 }

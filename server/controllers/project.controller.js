@@ -9,6 +9,7 @@ import Project from '../models/project';
 import User from '../models/user';
 import { resolvePathToFile } from '../utils/filePath';
 import generateFileSystemSafeName from '../utils/generateFileSystemSafeName';
+import logger from '../logger/winton';
 
 export {
   default as createProject,
@@ -20,16 +21,8 @@ export {
   apiGetProjectsForUser
 } from './project.controller/getProjectsForUser';
 
-export async function updateProject(req, res) {
-  try {
-    const project = await Project.findById(req.params.project_id).exec();
-    if (!project) {
-      res.status(404).send({
-        success: false,
-        message: 'Project with that id does not exist.'
-      });
-      return;
-    }
+export function updateProject(req, res) {
+  Project.findById(req.params.project_id, (findProjectErr, project) => {
     if (!project.user.equals(req.user._id)) {
       res.status(403).send({
         success: false,
@@ -47,7 +40,7 @@ export async function updateProject(req, res) {
       });
       return;
     }
-    const updatedProject = await Project.findByIdAndUpdate(
+    Project.findByIdAndUpdate(
       req.params.project_id,
       {
         $set: req.body
@@ -58,150 +51,156 @@ export async function updateProject(req, res) {
       }
     )
       .populate('user', 'username')
-      .exec();
-    if (
-      req.body.files &&
-      updatedProject.files.length !== req.body.files.length
-    ) {
-      const oldFileIds = updatedProject.files.map((file) => file.id);
-      const newFileIds = req.body.files.map((file) => file.id);
-      const staleIds = oldFileIds.filter((id) => newFileIds.indexOf(id) === -1);
-      staleIds.forEach((staleId) => {
-        updatedProject.files.id(staleId).remove();
+      .exec((updateProjectErr, updatedProject) => {
+        if (updateProjectErr) {
+          logger.error(updateProjectErr);
+          res.status(400).json({ success: false });
+          return;
+        }
+        if (
+          req.body.files &&
+          updatedProject.files.length !== req.body.files.length
+        ) {
+          const oldFileIds = updatedProject.files.map((file) => file.id);
+          const newFileIds = req.body.files.map((file) => file.id);
+          const staleIds = oldFileIds.filter(
+            (id) => newFileIds.indexOf(id) === -1
+          );
+          staleIds.forEach((staleId) => {
+            updatedProject.files.id(staleId).remove();
+          });
+          updatedProject.save((innerErr, savedProject) => {
+            if (innerErr) {
+              logger.error(innerErr);
+              res.status(400).json({ success: false });
+              return;
+            }
+            res.json(savedProject);
+          });
+        } else {
+          res.json(updatedProject);
+        }
       });
-      const savedProject = await updatedProject.save();
-      res.json(savedProject);
-    } else {
-      res.json(updatedProject);
-    }
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ success: false });
-  }
+  });
 }
 
-export async function getProject(req, res) {
+export function getProject(req, res) {
   const { project_id: projectId, username } = req.params;
-  const user = await User.findByUsername(username);
-  if (!user) {
-    return res
-      .status(404)
-      .send({ message: 'User with that username does not exist' });
-  }
-  const project = await Project.findOne({
-    user: user._id,
-    $or: [{ _id: projectId }, { slug: projectId }]
-  }).populate('user', 'username');
-  if (!project) {
-    return res
-      .status(404)
-      .send({ message: 'Project with that id does not exist' });
-  }
-  return res.json(project);
+  User.findByUsername(username, (err, user) => { // eslint-disable-line
+    if (!user) {
+      return res
+        .status(404)
+        .send({ message: 'Project with that username does not exist' });
+    }
+    Project.findOne({
+      user: user._id,
+      $or: [{ _id: projectId }, { slug: projectId }]
+    })
+      .populate('user', 'username')
+      .exec((err, project) => { // eslint-disable-line
+        if (err) {
+          logger.error(err);
+          return res
+            .status(404)
+            .send({ message: 'Project with that id does not exist' });
+        }
+        return res.json(project);
+      });
+  });
 }
 
 export function getProjectsForUserId(userId) {
-  return Project.find({ user: userId })
-    .sort('-createdAt')
-    .select('name files id createdAt updatedAt')
-    .exec();
+  return new Promise((resolve, reject) => {
+    Project.find({ user: userId })
+      .sort('-createdAt')
+      .select('name files id createdAt updatedAt')
+      .exec((err, projects) => {
+        if (err) {
+          logger.error(err);
+        }
+        resolve(projects);
+      });
+  });
 }
 
-export async function getProjectAsset(req, res) {
+export function getProjectAsset(req, res) {
   const projectId = req.params.project_id;
-  const project = await Project.findOne({
-    $or: [{ _id: projectId }, { slug: projectId }]
-  })
+  Project.findOne({ $or: [{ _id: projectId }, { slug: projectId }] })
     .populate('user', 'username')
-    .exec();
-  if (!project) {
-    return res
-      .status(404)
-      .send({ message: 'Project with that id does not exist' });
-  }
+    .exec(async (err, project) => { // eslint-disable-line
+      if (err) {
+        return res
+          .status(404)
+          .send({ message: 'Project with that id does not exist' });
+      }
+      if (!project) {
+        return res
+          .status(404)
+          .send({ message: 'Project with that id does not exist' });
+      }
 
-  const filePath = req.params[0];
-  const resolvedFile = resolvePathToFile(filePath, project.files);
-  if (!resolvedFile) {
-    return res.status(404).send({ message: 'Asset does not exist' });
-  }
-  if (!resolvedFile.url) {
-    return res.send(resolvedFile.content);
-  }
+      const filePath = req.params[0];
+      const resolvedFile = resolvePathToFile(filePath, project.files);
+      if (!resolvedFile) {
+        return res.status(404).send({ message: 'Asset does not exist' });
+      }
+      if (!resolvedFile.url) {
+        return res.send(resolvedFile.content);
+      }
 
-  try {
-    const { data } = await axios.get(resolvedFile.url, {
-      responseType: 'arraybuffer'
+      try {
+        const { data } = await axios.get(resolvedFile.url, {
+          responseType: 'arraybuffer'
+        });
+        res.send(data);
+      } catch (error) {
+        res.status(404).send({ message: 'Asset does not exist' });
+      }
     });
-    return res.send(data);
-  } catch (error) {
-    return res.status(404).send({ message: 'Asset does not exist' });
-  }
 }
 
-export async function getProjects(req, res) {
+export function getProjects(req, res) {
   if (req.user) {
-    const projects = await getProjectsForUserId(req.user._id);
-    res.json(projects);
+    getProjectsForUserId(req.user._id).then((projects) => {
+      res.json(projects);
+    });
   } else {
     // could just move this to client side
     res.json([]);
   }
 }
 
-/**
- * @param {string} projectId
- * @return {Promise<boolean>}
- */
-export async function projectExists(projectId) {
-  const project = await Project.findById(projectId);
-  return project != null;
+export function projectExists(projectId, callback) {
+  Project.findById(projectId, (err, project) =>
+    project ? callback(true) : callback(false)
+  );
 }
 
-/**
- * @param {string} username
- * @param {string} projectId - the database id or the slug or the project
- * @return {Promise<boolean>}
- */
-export async function projectForUserExists(username, projectId) {
-  const user = await User.findByUsername(username);
-  if (!user) return false;
-  const project = await Project.findOne({
-    user: user._id,
-    $or: [{ _id: projectId }, { slug: projectId }]
+export function projectForUserExists(username, projectId, callback) {
+  User.findByUsername(username, (err, user) => {
+    if (!user) {
+      callback(false);
+      return;
+    }
+    Project.findOne(
+      { user: user._id, $or: [{ _id: projectId }, { slug: projectId }] },
+      (innerErr, project) => {
+        if (!project) {
+          callback(false);
+          return;
+        }
+        callback(true);
+      }
+    );
   });
-  return project != null;
 }
 
-/**
- * @param {string} username
- * @param {string} projectId - the database id or the slug or the project
- * @return {Promise<object>}
- */
-export async function getProjectForUser(username, projectId) {
-  const user = await User.findByUsername(username);
-  if (!user) return { exists: false };
-  const project = await Project.findOne({
-    user: user._id,
-    $or: [{ _id: projectId }, { slug: projectId }]
-  });
-  return project != null
-    ? { exists: true, userProject: project }
-    : { exists: false };
-}
-
-/**
- * Adds URLs referenced in <script> tags to the `files` array of the project
- * so that they can be downloaded along with other remote files from S3.
- * @param {object} project
- * @void - modifies the `project` parameter
- */
 function bundleExternalLibs(project) {
   const indexHtml = project.files.find((file) => file.name === 'index.html');
   const { window } = new JSDOM(indexHtml.content);
   const scriptTags = window.document.getElementsByTagName('script');
 
-  Object.values(scriptTags).forEach(({ src }) => {
+  Object.values(scriptTags).forEach(async ({ src }, i) => {
     if (!isUrl(src)) return;
 
     const path = src.split('/');
@@ -217,34 +216,48 @@ function bundleExternalLibs(project) {
   });
 }
 
-/**
- * Recursively adds a file and all of its children to the JSZip instance.
- * @param {object} file
- * @param {Array<object>} files
- * @param {JSZip} zip
- * @return {Promise<void>} - modifies the `zip` parameter
- */
-async function addFileToZip(file, files, zip) {
-  if (file.fileType === 'folder') {
-    const folderZip = file.name === 'root' ? zip : zip.folder(file.name);
-    await Promise.all(
-      file.children.map((fileId) => {
+function addFileToZip(file, files, zip, path = '') {
+  return new Promise((resolve, reject) => {
+    if (file.fileType === 'folder') {
+      const newPath = file.name === 'root' ? path : `${path}${file.name}/`;
+      const numChildFiles = file.children.filter((f) => f.fileType !== 'folder')
+        .length;
+      let childrenAdded = 0;
+      if (numChildFiles === 0) {
+        zip.folder(file.name);
+        resolve();
+      }
+      file.children.forEach(async (fileId) => {
         const childFile = files.find((f) => f.id === fileId);
-        return addFileToZip(childFile, files, folderZip);
-      })
-    );
-  } else if (file.url) {
-    try {
-      const res = await axios.get(file.url, {
-        responseType: 'arraybuffer'
+
+        try {
+          await addFileToZip(childFile, files, zip, newPath);
+          childrenAdded += 1;
+
+          if (childrenAdded === numChildFiles) {
+            resolve();
+          }
+        } catch (err) {
+          reject(err);
+        }
       });
-      zip.file(file.name, res.data);
-    } catch (e) {
-      zip.file(file.name, new ArrayBuffer(0));
+    } else if (file.url) {
+      axios
+        .get(file.url, {
+          responseType: 'arraybuffer'
+        })
+        .then(({ data }) => {
+          zip.file(`${path}${file.name}`, data);
+          resolve();
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    } else {
+      zip.file(`${path}${file.name}`, file.content);
+      resolve();
     }
-  } else {
-    zip.file(file.name, file.content);
-  }
+  });
 }
 
 async function buildZip(project, req, res) {
@@ -274,12 +287,9 @@ async function buildZip(project, req, res) {
   }
 }
 
-export async function downloadProjectAsZip(req, res) {
-  const project = await Project.findById(req.params.project_id).exec();
-  if (!project) {
-    res.status(404).send({ message: 'Project with that id does not exist' });
-    return;
-  }
-  // save project to some path
-  buildZip(project, req, res);
+export function downloadProjectAsZip(req, res) {
+  Project.findById(req.params.project_id, (err, project) => {
+    // save project to some path
+    buildZip(project, req, res);
+  });
 }
